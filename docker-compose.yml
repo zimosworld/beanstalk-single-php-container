@@ -1,0 +1,14 @@
+version: '2'
+services:
+  eb_app:
+    build: environment/containers/development/eb_single_php_container_app
+    container_name: eb_app
+    volumes:
+      - ./application:/var/www/html
+      - ./logs/app:/var/log/httpd
+    labels:
+      - "traefik.frontend.rule=Host:local.eb.test.com"
+      - "traefik.port=80"
+    extra_hosts:
+      - "local.eb.test.com:127.0.0.1"
+    network_mode: "bridge"

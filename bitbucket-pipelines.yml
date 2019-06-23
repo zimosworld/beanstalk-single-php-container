@@ -1,0 +1,70 @@
+image:
+  name: atlassian/pipelines-awscli
+
+definitions:
+  composerInstall: &composerInstall
+    name: Install Composer
+    image: composer
+    caches:
+      - composer
+    script:
+      - composer install --no-ansi --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader
+    artifacts:
+      - 'application/vendor/**'
+  buildImage: &buildImage
+    name: Build and Push Docker Image
+    caches:
+      - docker
+    services:
+      - docker
+    script:
+      - export DOCKER_URI=$DOCKER_IMAGE_URL:prod-$BITBUCKET_BUILD_NUMBER
+      # Login to docker registry on AWS
+      - eval $(aws ecr get-login --no-include-email)
+      # Build image
+      - docker build -f environment/containers/production/eb_single_php_container_app/Dockerfile -t $DOCKER_URI .
+      # Push image to private registry
+      - docker push $DOCKER_URI
+  sendToAws: &sendToAws
+    name: Create EB Version
+    script:
+      # Set environment variables
+      - export DOCKER_URI=$DOCKER_IMAGE_URL:prod-$BITBUCKET_BUILD_NUMBER
+      - export FILE_NAME=build-$BITBUCKET_BUILD_NUMBER.zip
+      - export GIT_DESCRIPTION=`echo $(git log -1 --pretty=%B) | cut -c -199`
+      - export VERSION_NAME=${BITBUCKET_BUILD_NUMBER}_${BITBUCKET_TAG:=$BITBUCKET_BRANCH}
+      - cd environment/artifact
+      # Update options in AWS docker file
+      - sed -i "s|<IMAGE_URL>|$DOCKER_URI|g" Dockerrun.aws.json
+      # Compress deployment artifact
+      - zip $FILE_NAME -r * .[^.]*
+      # Copy AWS docker file to S3
+      - aws s3 cp "$FILE_NAME" s3://$BUILD_BUCKET/$BUILD_PATH/"$FILE_NAME"
+      # Create EB Application Version
+      - aws elasticbeanstalk create-application-version --application-name "$APP_NAME" --version-label "$VERSION_NAME" --description "$GIT_DESCRIPTION" --source-bundle S3Bucket=$BUILD_BUCKET,S3Key="$BUILD_PATH/$FILE_NAME"
+  deployStaging: &deployStaging
+    name: Deploy to Staging
+    deployment: staging
+    trigger: manual
+    script:
+      # Set environment variable
+      - export VERSION_NAME=${BITBUCKET_BUILD_NUMBER}_${BITBUCKET_TAG:=$BITBUCKET_BRANCH}
+      # Deploy api
+      - aws elasticbeanstalk update-environment --application-name "$APP_NAME" --environment-name "$APP_ENV_STAGING" --version-label "$VERSION_NAME"
+  deployProduction: &deployProduction
+    name: Deploy to Production
+    deployment: production
+    trigger: manual
+    script:
+      # Set environment variable
+      - export VERSION_NAME=${BITBUCKET_BUILD_NUMBER}_${BITBUCKET_TAG:=$BITBUCKET_BRANCH}
+      # Deploy api
+      - aws elasticbeanstalk update-environment --application-name "$APP_NAME" --environment-name "$APP_ENV_PRODUCTION" --version-label "$VERSION_NAME"
+pipelines:
+  branches:
+    release-*:
+      - step: *composerInstall
+      - step: *buildImage
+      - step: *sendToAws
+      - step: *deployStaging
+      - step: *deployProduction
